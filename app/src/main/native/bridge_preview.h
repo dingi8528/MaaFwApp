@@ -9,6 +9,7 @@ void SetPreviewSurface(JNIEnv *env, jobject jSurface);
 void ShutdownPreview(JNIEnv *env);
 bool IsPreviewEnabled();
 bool DispatchPreview(AImage *image);
+// After stopping image producers: releases queued images and waits for the renderer's image.
 void DrainPreviewQueue();
 
 // 预览直接画 AImage，不经过帧缓冲；帧缓冲换成黑帧时要另外把它画黑，否则还停在残影上

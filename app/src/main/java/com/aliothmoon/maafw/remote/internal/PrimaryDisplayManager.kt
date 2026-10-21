@@ -39,6 +39,7 @@ object PrimaryDisplayManager {
     }
 
 
+    @Synchronized
     private fun onDisplayChange(displayId: Int) {
         if (displayId != DISPLAY_ID) {
             return
@@ -59,6 +60,7 @@ object PrimaryDisplayManager {
         onDisplayChange(DISPLAY_ID)
     }
 
+    @Synchronized
     fun start(): Int {
         if (!setup.get()) {
             setup()
@@ -71,6 +73,7 @@ object PrimaryDisplayManager {
         return startInternal()
     }
 
+    @Synchronized
     fun stop() {
         if (!state.compareAndSet(STATE_CAPTURING, STATE_IDLE)) {
             return
@@ -78,6 +81,7 @@ object PrimaryDisplayManager {
         releaseResources()
     }
 
+    @Synchronized
     fun restart() {
         if (state.get() != STATE_CAPTURING) {
             return

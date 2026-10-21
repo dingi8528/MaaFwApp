@@ -63,6 +63,9 @@ static std::thread g_renderThread;
 static std::queue<AImage *> g_renderQueue;
 static std::mutex g_renderMutex;
 static std::condition_variable g_renderCv;
+static std::condition_variable g_renderIdleCv;
+// Guarded by g_renderMutex; includes the image already popped by RenderLoop.
+static bool g_renderingImage = false;
 static std::atomic<bool> g_renderThreadRunning{false};
 static ANativeWindow *g_pendingWindow = nullptr;
 static bool g_pendingDetach = false;
@@ -327,6 +330,7 @@ static void RenderLoop() {
             if (!g_renderQueue.empty()) {
                 image = g_renderQueue.front();
                 g_renderQueue.pop();
+                g_renderingImage = true;
             }
         }
 
@@ -356,6 +360,11 @@ static void RenderLoop() {
                 RenderPreview(hb);
             }
             AImage_delete(image);
+            {
+                std::lock_guard<std::mutex> lock(g_renderMutex);
+                g_renderingImage = false;
+            }
+            g_renderIdleCv.notify_all();
         }
     }
 
@@ -478,8 +487,11 @@ bool DispatchPreview(AImage *image) {
 }
 
 void DrainPreviewQueue() {
-    std::lock_guard<std::mutex> lock(g_renderMutex);
+    std::unique_lock<std::mutex> lock(g_renderMutex);
     DrainPreviewQueueLocked();
+    // The caller has already stopped image callbacks. Waiting releases g_renderMutex so the
+    // render thread can delete its current AImage and notify us before its reader is closed.
+    g_renderIdleCv.wait(lock, [] { return !g_renderingImage; });
 }
 
 void BlankPreview(int64_t expectedFrameCount) {
