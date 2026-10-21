@@ -18,6 +18,7 @@ import com.aliothmoon.maafw.runner.RunOutcome
 import com.aliothmoon.maafw.runner.RunPlanPayload
 import com.aliothmoon.maafw.runner.runPlanWireJson
 import com.aliothmoon.maafw.third.Ln
+import com.aliothmoon.maafw.util.ScreenSize
 import com.sun.jna.Memory
 import com.sun.jna.Pointer
 import kotlinx.serialization.json.JsonArray
@@ -56,13 +57,20 @@ class MaaRunner(private val agentHost: AgentHost) {
     private var loadedResourcePaths: List<String> = emptyList()
 
     /**
-     * 已建 controller 绑定的 display_id；变了必须重建
+     * 已建 controller 的显示器与触摸尺寸；任何一项变了都必须重建
      *
      * 光判 `MaaControllerConnected` 不够：切运行模式后旧 controller 仍报 connected，
      * 但它的 display_id 指向的屏已经销毁了，`start_app` 会拿着废 id 去 launchDisplayId
      * 而被系统拒（`SecurityException: Permission Denial ... with launchDisplayId=<旧 id>`）
      */
-    private var boundDisplayId: Int? = null
+    private var boundControllerTarget: ControllerTarget? = null
+
+    private data class ControllerTarget(
+        val displayId: Int,
+        val width: Int,
+        val height: Int,
+        val forceStop: Boolean,
+    )
 
     /** agent child 的 cwd，对齐上游 MaaPiCli 的 `agent.cwd = resource_dir_` */
     private var projectRoot: String? = null
@@ -334,22 +342,18 @@ class MaaRunner(private val agentHost: AgentHost) {
 
     /** 返回 null 表示就绪，否则返回失败原因 */
     private fun prepare(lib: MaaFrameworkLibrary, payload: RunPlanPayload): PrepareFailure? {
+        // 只读取一次采集尺寸：比例校验、复用判断和配置 JSON 共用同一份快照。
+        val target = snapshotControllerTarget(payload) ?: return PrepareFailure(
+            if (payload.displayMode == DisplayMode.PRIMARY) "主屏采集未启动" else "虚拟显示器未启动",
+        )
+        if (payload.displayMode == DisplayMode.PRIMARY && !ScreenSize.isAspect16x9(target.width, target.height)) {
+            return PrepareFailure(
+                "前台模式要求 16:9 画面，当前为 ${target.width}×${target.height}；请切换后台模式，或在首页调整主屏分辨率后重试",
+            )
+        }
         // bridge 必须先 System.loadLibrary 进本进程，控制单元按名 dlopen 才能命中同一份
         if (!NativeBridgeLib.LOADED) {
             return PrepareFailure("libbridge.so 未加载，无法建立 native controller")
-        }
-
-        val displayId = when (payload.displayMode) {
-            DisplayMode.PRIMARY ->
-                if (PrimaryDisplayManager.getCaptureSize() == null) {
-                    return PrepareFailure("主屏采集未启动")
-                } else {
-                    PrimaryDisplayManager.DISPLAY_ID
-                }
-
-            else -> VirtualDisplayManager.getDisplayId().takeIf {
-                it != DefaultDisplayConfig.DISPLAY_NONE
-            } ?: return PrepareFailure("虚拟显示器未启动")
         }
 
         if (resource == null || loadedResourcePaths != payload.resourcePaths) {
@@ -369,15 +373,19 @@ class MaaRunner(private val agentHost: AgentHost) {
 
         prepareAgents(lib, payload)?.let { return it }
 
+        return prepareController(lib, target)
+    }
+
+    private fun prepareController(lib: MaaFrameworkLibrary, target: ControllerTarget): PrepareFailure? {
         // 换 controller 时先建新的、把 agent 改登记过去，再拆旧的 controller 与 tasker：
         // agent client 断开与销毁时还要对登记过的对象 remove_sink，旧对象先拆就成了野指针；
         // 这样换屏时活着的 agent 照常复用，不必重拉 child
         var retired: RetiredHandles? = null
         if (controller == null ||
-            boundDisplayId != displayId ||
+            boundControllerTarget != target ||
             lib.MaaControllerConnected(controller).toInt() == 0
         ) {
-            val config = buildControllerConfig(payload, displayId)
+            val config = buildControllerConfig(target)
             val ctrl = lib.MaaAndroidNativeControllerCreate(config)
                 ?: return PrepareFailure("MaaAndroidNativeControllerCreate 失败: $config")
             lib.MaaControllerAddSink(ctrl, eventSink, null)
@@ -393,7 +401,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             // Tasker 手里是旧 controller 的裸指针，跟着一起退
             retired = RetiredHandles(controller, takeTasker())
             controller = ctrl
-            boundDisplayId = displayId
+            boundControllerTarget = target
         }
 
         try {
@@ -590,34 +598,34 @@ class MaaRunner(private val agentHost: AgentHost) {
         runCatching { agentLib?.MaaAgentClientDestroy(agent.client) }
     }
 
+    private fun snapshotControllerTarget(payload: RunPlanPayload): ControllerTarget? = when (payload.displayMode) {
+        DisplayMode.PRIMARY -> PrimaryDisplayManager.getCaptureSize()?.let { (width, height) ->
+            ControllerTarget(PrimaryDisplayManager.DISPLAY_ID, width, height, forceStop = false)
+        }
+
+        else -> VirtualDisplayManager.getDisplayId().takeIf { it != DefaultDisplayConfig.DISPLAY_NONE }?.let { displayId ->
+            val config = VirtualDisplayManager.getConfig()
+            ControllerTarget(displayId, config.width, config.height, forceStop = true)
+        }
+    }
+
     /**
-     * screen_resolution 必须与帧缓冲、触摸坐标空间三者一致，不一致时 screencap 立即失败
+     * screen_resolution 是 native controller 的触摸边界，必须与采集器的坐标空间一致。
      * library_path 用裸名：bridge 已在本进程加载，控制单元 dlopen 同名即命中同一份
      *
      * 虚拟屏模式下 force_stop 必须为 true：目标应用若已在主屏上跑着，startActivity 会复用它在主屏的
      * 既有 task，虚拟屏上拿不到画面。先杀掉再拉起，进程才会落到虚拟屏上
      * 主屏模式反过来——目标就在主屏，杀掉只会把用户已经摆好的现场清空
      */
-    private fun buildControllerConfig(payload: RunPlanPayload, displayId: Int): String {
-        val (width, height) = when (payload.displayMode) {
-            // 主屏尺寸跟着旋转变，app 侧发 payload 时算的值可能已经过期，只认采集器当下这一份
-            DisplayMode.PRIMARY -> PrimaryDisplayManager.getCaptureSize()
-                ?: (DefaultDisplayConfig.WIDTH to DefaultDisplayConfig.HEIGHT)
-
-            else -> {
-                val vd = VirtualDisplayManager.getConfig()
-                (payload.screenWidth.takeIf { it > 0 } ?: vd.width) to
-                    (payload.screenHeight.takeIf { it > 0 } ?: vd.height)
-            }
-        }
+    private fun buildControllerConfig(target: ControllerTarget): String {
         return buildJsonObject {
             put("library_path", BRIDGE_LIBRARY_NAME)
             put("screen_resolution", buildJsonObject {
-                put("width", width)
-                put("height", height)
+                put("width", target.width)
+                put("height", target.height)
             })
-            put("display_id", displayId)
-            put("force_stop", payload.displayMode != DisplayMode.PRIMARY)
+            put("display_id", target.displayId)
+            put("force_stop", target.forceStop)
         }.toString()
     }
 
@@ -657,7 +665,7 @@ class MaaRunner(private val agentHost: AgentHost) {
         releaseTasker(lib)
         controller?.let { destroyController(lib, it) }
         controller = null
-        boundDisplayId = null
+        boundControllerTarget = null
     }
 
     private fun destroyController(lib: MaaFrameworkLibrary, handle: Pointer) {
