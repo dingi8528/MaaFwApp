@@ -229,7 +229,9 @@ class RemoteServiceImpl : RemoteService.Stub() {
     }
 
     override fun startVirtualDisplay(): Int = when (virtualDisplayMode.get()) {
-        DisplayMode.PRIMARY -> PrimaryDisplayManager.start()
+        DisplayMode.PRIMARY -> PrimaryDisplayManager.start().also { displayId ->
+            if (displayId != DefaultDisplayConfig.DISPLAY_NONE) GameFpsMonitor.startForCapture()
+        }
         DisplayMode.BACKGROUND -> VirtualDisplayManager.start().also { displayId ->
             if (displayId != DefaultDisplayConfig.DISPLAY_NONE) {
                 PowerController.startUserActivityKeepAlive(displayId)

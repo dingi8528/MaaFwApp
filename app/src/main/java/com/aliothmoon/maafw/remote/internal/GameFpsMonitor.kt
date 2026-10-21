@@ -12,10 +12,10 @@ import java.lang.reflect.Proxy
 import kotlin.concurrent.thread
 
 /**
- * 后台虚拟屏上的目标游戏实时帧率
+ * 安卓目标游戏帧率；前台尚未指定游戏时使用主屏采集合成帧率
  *
  * Android 13+ 优先用 SurfaceFlinger 的 task present-to-present FPS；旧系统或注册失败时，
- * 按 libbridge 收到的合成帧计数做差。虚拟屏预览上只有目标游戏，两种口径都可用。
+ * 按 libbridge 收到的合成帧计数做差。采集帧率是近似值，不等同于游戏输入采样率。
  */
 object GameFpsMonitor {
 
@@ -46,6 +46,11 @@ object GameFpsMonitor {
         if (source == null) start(packageName)
     }
 
+    /** 前台任务可以直接接手已打开的游戏，不一定经过 StartApp。 */
+    @JvmStatic
+    @Synchronized
+    fun startForCapture() = start("")
+
     @JvmStatic
     @Synchronized
     fun stop() {
@@ -60,6 +65,7 @@ object GameFpsMonitor {
     fun currentFps(): Float = source?.currentFps() ?: UNKNOWN
 
     private fun createTaskSource(packageName: String): TaskFpsSource? {
+        if (packageName.isBlank()) return null
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
         val taskId = ActivityUtils.findTaskId(packageName) ?: run {
             Ln.w("$TAG: no task for $packageName, fall back to frame count")

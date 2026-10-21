@@ -47,7 +47,9 @@ public final class DriverClass {
         logTargetAppInfo(packageName, displayId, forceStop);
         targetPackage = ActivityUtils.packageNameOf(packageName);
         if (displayId == PrimaryDisplayManager.DISPLAY_ID) {
-            return ActivityUtils.startApp(packageName, displayId, forceStop);
+            boolean ret = ActivityUtils.startApp(packageName, displayId, forceStop);
+            if (ret) GameFpsMonitor.start(targetPackage);
+            return ret;
         }
         String target = ActivityUtils.packageNameOf(packageName);
         // Tell the watchdog before launching: a game SDK may leave the VD before its first poll.
