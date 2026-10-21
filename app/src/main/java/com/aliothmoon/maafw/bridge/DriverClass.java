@@ -5,6 +5,7 @@ import android.content.pm.PackageInfo;
 import android.os.SystemClock;
 
 import com.aliothmoon.maafw.remote.internal.ActivityUtils;
+import com.aliothmoon.maafw.remote.internal.AppWatchdog;
 import com.aliothmoon.maafw.remote.internal.GameFpsMonitor;
 import com.aliothmoon.maafw.remote.internal.PrimaryDisplayManager;
 import com.aliothmoon.maafw.third.FakeContext;
@@ -13,6 +14,7 @@ import com.aliothmoon.maafw.third.Ln;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 
 import timber.log.Timber;
 
@@ -45,20 +47,29 @@ public final class DriverClass {
             return ActivityUtils.startApp(packageName, displayId, forceStop);
         }
         String target = ActivityUtils.packageNameOf(packageName);
-        boolean ret = ActivityUtils.startApp(packageName, displayId, forceStop, true);
+        // Tell the watchdog before launching: a game SDK may leave the VD before its first poll.
+        // The watchdog accepts registrations only for the current background run's display.
+        AppWatchdog.TargetToken token = AppWatchdog.registerTarget(target, displayId);
+        if (token == null) return false;
+        BooleanSupplier stillActive = () -> AppWatchdog.isTargetActive(token);
+        boolean ret = ActivityUtils.startApp(packageName, displayId, forceStop, true, stillActive);
         if (ret) {
             // 部分 ROM（如 One UI）会把游戏从虚拟屏挪回主屏，启动后校验并尝试拉回；
             // 拉不回则快速失败，避免识别对着虚拟屏空转
             // 这里比对的是包名，PI 给的可能是 "包名/Activity"，先拆
-            ret = ActivityUtils.ensureAppOnDisplay(target, displayId);
+            ret = ActivityUtils.ensureAppOnDisplay(target, displayId, stillActive);
             if (!ret) {
                 Ln.e(TAG + ": " + target + " could not be pinned on display " + displayId);
             }
         }
-        if (ret) {
-            awaitFirstFrame();
-            GameFpsMonitor.start(target);
+        if (ret && stillActive.getAsBoolean()) {
+            awaitFirstFrame(stillActive);
+            ret = stillActive.getAsBoolean();
+            if (ret) GameFpsMonitor.start(target);
+        } else {
+            ret = false;
         }
+        if (!ret) AppWatchdog.clearTarget(token);
         return ret;
     }
 
@@ -85,10 +96,10 @@ public final class DriverClass {
         }
     }
 
-    private static void awaitFirstFrame() {
+    private static void awaitFirstFrame(BooleanSupplier stillActive) {
         long baseline = NativeBridgeLib.getFrameCount();
         int elapsed = 0;
-        while (NativeBridgeLib.getFrameCount() <= baseline && elapsed < FRAME_WAIT_TIMEOUT_MS) {
+        while (stillActive.getAsBoolean() && NativeBridgeLib.getFrameCount() <= baseline && elapsed < FRAME_WAIT_TIMEOUT_MS) {
             try {
                 Thread.sleep(FRAME_WAIT_INTERVAL_MS);
             } catch (InterruptedException e) {

@@ -143,7 +143,7 @@ class RemoteServiceImpl : RemoteService.Stub() {
     }
 
     override fun stopTargetApp(): Boolean {
-        val target = AppWatchdog.targetPackage ?: run {
+        val target = AppWatchdog.cleanupTargetPackage ?: run {
             Ln.i("$TAG: stopTargetApp skipped, watchdog never acquired a target")
             return false
         }
@@ -334,13 +334,20 @@ class RemoteServiceImpl : RemoteService.Stub() {
         runner.setCallback(callback)
     }
 
+    @Synchronized
     override fun startRun(runPlanJson: String?): Boolean {
         if (runPlanJson.isNullOrBlank()) return false
+        if (runner.isRunning()) return false
         StaleFrameGuard.blankIfVacant()
+        val background = virtualDisplayMode.get() == DisplayMode.BACKGROUND
+        // Prepare before worker submission so its first StartApp cannot race target cleanup.
+        AppWatchdog.prepareRun(if (background) VirtualDisplayManager.getDisplayId() else DefaultDisplayConfig.DISPLAY_NONE)
         val started = runner.start(runPlanJson)
         if (started) {
             AppWatchdog.startWatching(runner::isRunning)
             StaleFrameGuard.start(runner::isRunning)
+        } else {
+            AppWatchdog.stopWatching()
         }
         return started
     }

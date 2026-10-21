@@ -146,7 +146,8 @@ public final class ActivityManager {
                     /* userId */ /* UserHandle.USER_CURRENT */ -2);
         } catch (Throwable e) {
             Ln.e("Could not invoke method", e);
-            return 0;
+            // 0 is START_SUCCESS; let ActivityUtils retry through `am start --display`.
+            return -1;
         }
     }
 
