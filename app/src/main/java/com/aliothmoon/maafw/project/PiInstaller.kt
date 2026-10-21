@@ -11,6 +11,11 @@ import java.io.FileNotFoundException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.CRC32
@@ -130,8 +135,8 @@ class PiInstaller(
     /**
      * 不看标记，无条件重解；设置页的手动重来与失败重试都走这条
      *
-     * 眼下这份是完整的才全清：那是用户点「重新解压」要的恢复原样，agent 写坏的记录也靠它清。
-     * 标记对不上说明上一次重解没走完，这时的重试是那次升级的延续，agent 数据照样留着
+     * 已就绪时恢复包内资源并清掉临时记录，但 config 是库存、队伍缓存和羁绊进度等用户数据，始终保留。
+     * 标记对不上说明上一次重解没走完，这时的重试是那次升级的延续，其余 agent 数据照样留着。
      */
     @Synchronized
     fun reinstall(onProgress: PiUnpackProgress = NO_PROGRESS): File {
@@ -154,7 +159,7 @@ class PiInstaller(
         // 换标记之前的包留在外部私有目录里的，不删会一直躺着，adb 翻这个目录时看着像还在生效
         File(base, LEGACY_MARKER_NAME).delete()
         if (wipe) {
-            target.deleteRecursively()
+            clearReinstallTarget(target)
         } else {
             // 上一份包带过、这一份不再带的根级条目，不清就一直躺着；新包自己带的由 unpack 逐个替换
             // 没有这份清单的旧安装只能靠后者，那一次升级可能留下旧包独有的目录
@@ -169,11 +174,38 @@ class PiInstaller(
         return target
     }
 
+    /**
+     * 手动重解仅清理资源与临时记录；config 不搬运、不遍历，失败和重试也不会丢失用户数据。
+     * 删除旁支时不跟随符号链接，外部目录不能因资源重解被连带清空。
+     */
+    private fun clearReinstallTarget(target: File) {
+        if (!target.exists()) return
+        if (Files.isSymbolicLink(target.toPath()) || !target.isDirectory) {
+            throw PiUnpackException("invalid PI install directory: $target")
+        }
+        val children = target.listFiles() ?: throw IOException("cannot list PI install directory: $target")
+        children.filter { it.name != USER_DATA_ROOT }.forEach { child ->
+            Files.walkFileTree(child.toPath(), object : SimpleFileVisitor<Path>() {
+                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    Files.delete(file)
+                    return FileVisitResult.CONTINUE
+                }
+
+                override fun postVisitDirectory(dir: Path, error: IOException?): FileVisitResult {
+                    if (error != null) throw error
+                    Files.delete(dir)
+                    return FileVisitResult.CONTINUE
+                }
+            })
+        }
+    }
+
     /** 清单是外部私有目录里的普通文件，谁都改得动：混进路径分隔符或 `..` 的行不认，免得删到 PI 根外面 */
     private fun readRoots(rootsFile: File): List<String> {
         if (!rootsFile.isFile) return emptyList()
         return rootsFile.readLines()
             .map(String::trim)
+            .filter { it != USER_DATA_ROOT }
             .filter { it.isNotEmpty() && it != "." && it != ".." && '/' !in it && '\\' !in it }
     }
 
@@ -282,7 +314,12 @@ class PiInstaller(
         return crc.value
     }
 
-    private fun rootOf(entry: String): String = entry.substringBefore('/')
+    private fun rootOf(entry: String): String = normalizeZipName(entry).substringBefore('/').also { root ->
+        // MaaFGO 的 config 只属于运行期；即使误改打包配方，也不能覆盖库存和用户队伍。
+        if (root == USER_DATA_ROOT) {
+            throw PiUnpackException("PI package contains reserved user data root: $USER_DATA_ROOT")
+        }
+    }
 
     private fun requireInterfaceJson(dest: File) {
         if (!File(dest, INTERFACE_JSON).isFile) {
@@ -291,10 +328,13 @@ class PiInstaller(
     }
 
     private fun normalizeZipName(raw: String): String {
-        val name = raw.replace('\\', '/').trimStart('/')
-        if (name.isEmpty() || name.split('/').any { it == ".." }) {
+        val parts = raw.replace('\\', '/').trimStart('/').split('/')
+        if (parts.any { it == ".." }) {
             throw PiUnpackException("illegal PI archive entry: $raw")
         }
+        // ./config 和重复分隔符也是 config；不能把点目录当包根并误删整棵 PI。
+        val name = parts.filter { it.isNotEmpty() && it != "." }.joinToString("/")
+        if (name.isEmpty()) throw PiUnpackException("illegal PI archive entry: $raw")
         return name
     }
 
@@ -325,6 +365,7 @@ class PiInstaller(
         private const val LEGACY_MARKER_NAME = "pi.fingerprint"
 
         private const val INTERFACE_JSON = "interface.json"
+        private const val USER_DATA_ROOT = "config"
         private const val NO_MEDIA_NAME = ".nomedia"
         private const val COPY_BUFFER_BYTES = 128 * 1024
 

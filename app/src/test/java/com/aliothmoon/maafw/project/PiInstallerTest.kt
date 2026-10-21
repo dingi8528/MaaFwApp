@@ -132,14 +132,14 @@ class PiInstallerTest {
     @Test
     fun `包内根级条目里 agent 写的文件随升级替换`() {
         val base = temp.newFolder("external")
-        val withConfig = files + ("config/default.json" to "{}")
-        val root = installer(base, MapPiPackage(withConfig), 11).ensureInstalled()
-        File(root, "config/user.json").writeText("{}")
+        val withDefaults = files + ("defaults/default.json" to "{}")
+        val root = installer(base, MapPiPackage(withDefaults), 11).ensureInstalled()
+        File(root, "defaults/user.json").writeText("{}")
 
-        installer(base, MapPiPackage(withConfig), 12).ensureInstalled()
+        installer(base, MapPiPackage(withDefaults), 12).ensureInstalled()
 
-        assertTrue(File(root, "config/default.json").isFile)
-        assertFalse(File(root, "config/user.json").exists())
+        assertTrue(File(root, "defaults/default.json").isFile)
+        assertFalse(File(root, "defaults/user.json").exists())
     }
 
     /** 清单是外部私有目录里的普通文件；被改坏也不能删到 PI 根外面 */
