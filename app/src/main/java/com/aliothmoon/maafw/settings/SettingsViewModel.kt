@@ -193,7 +193,8 @@ class SettingsViewModel(
 
     /**
      * 启动自检：等设置读盘与 PI 就绪后查一次；VM 存活期内只跑这一回。
-     * 不写 checkResult（首页不出现结果行）；已是最新弹 Toast（与手动检查同一句），失败照弹错误窗，
+     * 所选源未配置时静默跳过；不写 checkResult（首页不出现结果行）。
+     * 已是最新弹 Toast（与手动检查同一句），其他失败照弹错误窗，
      * 发现新版本按自动下载开关走静默下载或弹「发现新版本」dialog
      */
     private suspend fun startupUpdateCheck() {
@@ -201,15 +202,25 @@ class SettingsViewModel(
         if (!appSettings.autoCheckUpdate.value) return
         val metadata = projectRepository.state.filterIsInstance<ProjectState.Ready>()
             .first().definition.metadata
+        val source = appSettings.updateSource.value
+        val rid = mirrorchyanRid(metadata)
+        val configured = when (source) {
+            UpdateSource.MIRRORCHYAN -> !rid.isNullOrBlank()
+            UpdateSource.GITHUB -> !metadata.githubRepository.isNullOrBlank()
+        }
+        if (!configured) {
+            Timber.tag("UpdateCheck").i("startup check skipped: %s is not configured", source)
+            return
+        }
         if (updateOperation.value.checking || updateOperation.value.downloading) return
         updateOperation.update { it.copy(checking = true) }
         val result = updateService.check(
             UpdateCheckRequest(
-                source = appSettings.updateSource.value,
+                source = source,
                 currentVersion = currentVersion,
                 channel = appSettings.updateChannel.value,
                 abi = abi,
-                mirrorchyanRid = mirrorchyanRid(metadata),
+                mirrorchyanRid = rid,
                 githubRepository = metadata.githubRepository,
             ),
         )

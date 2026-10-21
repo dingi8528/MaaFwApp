@@ -274,6 +274,66 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `startup missing selected github source stays silent without switching to configured mirror`() = runTest {
+        var checks = 0
+        val settings = FakeAppSettingsGateway().also {
+            it.setAutoCheckUpdate(true)
+            it.updateSource.value = UpdateSource.GITHUB
+        }
+        val viewModel = viewModel(
+            service = mockk {
+                coEvery { check(any()) } coAnswers {
+                    checks++
+                    UpdateCheckResult.SourceFailed(UpdateSource.GITHUB, UpdateCheckFailure.MISSING_CONFIGURATION)
+                }
+            },
+            settings = settings,
+            metadata = ProjectMetadata(githubRepository = null, mirrorchyanRid = "configured-mirror"),
+        )
+        advanceUntilIdle()
+
+        assertEquals(0, checks)
+        assertEquals(UpdateSource.GITHUB, settings.updateSource.value)
+        assertTrue(settings.autoCheckUpdate.value)
+        val panel = latestPanel(viewModel)
+        assertFalse(panel.checking)
+        assertNull(panel.checkResult)
+        assertNull(panel.errorPrompt)
+        assertNull(panel.updatePrompt)
+    }
+
+    @Test
+    fun `manual check still reports missing selected source after silent startup skip`() = runTest {
+        val requests = mutableListOf<UpdateCheckRequest>()
+        val settings = FakeAppSettingsGateway().also {
+            it.setAutoCheckUpdate(true)
+            it.updateSource.value = UpdateSource.GITHUB
+        }
+        val viewModel = viewModel(
+            service = mockk {
+                coEvery { check(any()) } coAnswers {
+                    requests += firstArg<UpdateCheckRequest>()
+                    UpdateCheckResult.SourceFailed(UpdateSource.GITHUB, UpdateCheckFailure.MISSING_CONFIGURATION)
+                }
+            },
+            settings = settings,
+            metadata = ProjectMetadata(githubRepository = null, mirrorchyanRid = "configured-mirror"),
+        )
+        advanceUntilIdle()
+        viewModel.onIntent(SettingsIntent.CheckUpdate)
+        advanceUntilIdle()
+
+        assertEquals(1, requests.size)
+        assertEquals(UpdateSource.GITHUB, requests.single().source)
+        assertEquals(UpdateSource.GITHUB, settings.updateSource.value)
+        assertTrue(settings.autoCheckUpdate.value)
+        val panel = latestPanel(viewModel)
+        assertTrue(panel.checkResult is UpdateCheckResult.SourceFailed)
+        assertNotNull(panel.errorPrompt)
+        assertFalse(panel.checking)
+    }
+
+    @Test
     fun `startup check that is up to date only toasts`() = runTest {
         val viewModel = viewModel(
             service = mockk {
@@ -556,6 +616,10 @@ class SettingsViewModelTest {
         },
         settings: AppSettingsGateway = FakeAppSettingsGateway(),
         clockMillis: () -> Long = { 0L },
+        metadata: ProjectMetadata = ProjectMetadata(
+            githubRepository = "owner/repo",
+            mirrorchyanRid = "mirror-rid",
+        ),
     ): SettingsViewModel {
         val definition = ProjectDefinition(
             name = "demo",
@@ -566,10 +630,7 @@ class SettingsViewModelTest {
             groups = emptyList(),
             options = emptyMap(),
             templates = emptyList(),
-            metadata = ProjectMetadata(
-                githubRepository = "owner/repo",
-                mirrorchyanRid = "mirror-rid",
-            ),
+            metadata = metadata,
         )
         return SettingsViewModel(
             permissionGateway = FakePermissionGateway(),
