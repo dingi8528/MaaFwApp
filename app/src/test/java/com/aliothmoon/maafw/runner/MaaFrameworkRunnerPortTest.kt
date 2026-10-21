@@ -324,6 +324,20 @@ class MaaFrameworkRunnerPortTest {
     }
 
     @Test
+    fun `foreground display failures use localized instructions instead of raw service text`() = runTest(dispatcher) {
+        val (runner, _) = port(this)
+        val (callbacks, _) = recordCallbacks(runner)
+        for ((outcome, message) in listOf(
+            RunOutcome.FOREGROUND_LANDSCAPE_REQUIRED to R.string.runner_foreground_landscape_required,
+            RunOutcome.FOREGROUND_CAPTURE_CHANGED to R.string.runner_foreground_capture_changed,
+        )) {
+            runner.start(plan(), "e$outcome")
+            callbacks.last().onFinished(outcome, "raw diagnostic dimensions")
+            assertTrue((runner.state.value.latestResult as ExecutionResult.Failed).reason.isResource(message))
+        }
+    }
+
+    @Test
     fun `an agent launch failure drops the hint once debug mode is on`() = runTest(dispatcher) {
         var debug = false
         val (runner, _) = port(this, debugMode = { debug })

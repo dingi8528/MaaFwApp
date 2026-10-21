@@ -43,6 +43,8 @@
     <!-- Runner toggle -->
     <string name="runner_start">Start tasks</string>
     <string name="runner_foreground_blocked">Foreground mode is active; switch to background mode first</string>
+    <string name="runner_foreground_landscape_required">Foreground mode needs a landscape 16:9 game screen. Adjust the resolution, open the game manually and wait for landscape, then start from the floating panel; or switch to background mode</string>
+    <string name="runner_foreground_capture_changed">The screen size changed during the foreground run, so the task was stopped. Reopen the game in landscape 16:9, then start again from the floating panel</string>
     <string name="runner_background_unsupported">Background mode is unavailable below Android 10. Try another device or update the system.</string>
     <string name="runner_stop">Stop</string>
     <string name="runner_stopping">Stopping…</string>

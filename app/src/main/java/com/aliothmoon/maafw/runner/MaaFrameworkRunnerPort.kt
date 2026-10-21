@@ -256,6 +256,8 @@ class MaaFrameworkRunnerPort(
                 RunOutcome.COMPLETED_WITH_FAILURES -> ExecutionResult.CompletedWithFailures(results)
                 RunOutcome.CANCELLED -> ExecutionResult.Cancelled(results)
                 RunOutcome.AGENT_LAUNCH_FAILED -> ExecutionResult.Failed(agentLaunchFailure(reason?.toIntOrNull()), results)
+                RunOutcome.FOREGROUND_LANDSCAPE_REQUIRED -> ExecutionResult.Failed(uiTextOf(R.string.runner_foreground_landscape_required), results)
+                RunOutcome.FOREGROUND_CAPTURE_CHANGED -> ExecutionResult.Failed(uiTextOf(R.string.runner_foreground_capture_changed), results)
                 else -> ExecutionResult.Failed(if (reason.isNullOrBlank()) uiTextOf(R.string.msg_fail_default) else uiTextFromFramework(reason), results)
             }
             emit(RunnerEvent.ExecutionFinished(result))

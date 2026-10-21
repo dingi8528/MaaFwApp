@@ -1,11 +1,14 @@
 package com.aliothmoon.maafw.remote
 
 import com.aliothmoon.maafw.constant.DisplayMode
+import com.aliothmoon.maafw.bridge.DriverClass
 import com.aliothmoon.maafw.maa.MaaAgentClientLibrary
 import com.aliothmoon.maafw.maa.MaaAgentClientLoader
 import com.aliothmoon.maafw.maa.MaaFrameworkLibrary
+import com.aliothmoon.maafw.maa.MaaFrameworkLoader
 import com.aliothmoon.maafw.maa.MaaStatus
 import com.aliothmoon.maafw.remote.internal.PrimaryDisplayManager
+import com.aliothmoon.maafw.remote.internal.PrimaryInputGuard
 import com.aliothmoon.maafw.remote.internal.VirtualDisplayManager
 import com.aliothmoon.maafw.runner.RunOutcome
 import com.aliothmoon.maafw.runner.RunPlanPayload
@@ -13,6 +16,7 @@ import com.sun.jna.Pointer
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
+import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import io.mockk.verify
 import io.mockk.verifyOrder
@@ -23,12 +27,16 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.TimeUnit
 
 /** Drives the runner's real handle preparation without loading Android native libraries. */
 class MaaRunnerControllerTargetTest {
@@ -70,7 +78,11 @@ class MaaRunnerControllerTargetTest {
     }
 
     @After
-    fun tearDown() = unmockkAll()
+    fun tearDown() {
+        PrimaryInputGuard.clear()
+        (field(runner, "primaryInputStopper") as ExecutorService).shutdownNow()
+        unmockkAll()
+    }
 
     @Test
     fun `same display resize rebinds live agent before retiring old native pointers`() {
@@ -166,7 +178,7 @@ class MaaRunnerControllerTargetTest {
         every { PrimaryDisplayManager.getCaptureSize() } returns (2160 to 720)
         val failure = invoke("prepare", lib, payload())
         assertNotNull(failure)
-        assertEquals(RunOutcome.FAILED, field(failure!!, "outcome"))
+        assertEquals(RunOutcome.FOREGROUND_LANDSCAPE_REQUIRED, field(failure!!, "outcome"))
         val reason = field(failure, "reason") as String
         assertTrue(reason.contains("2160×720"))
         assertTrue(reason.contains("后台模式"))
@@ -175,6 +187,133 @@ class MaaRunnerControllerTargetTest {
         verify(exactly = 0) { lib.MaaResourceCreate() }
         verify(exactly = 0) { lib.MaaAndroidNativeControllerCreate(any()) }
         verify(exactly = 0) { agentLib.MaaAgentClientCreateV2(any()) }
+    }
+
+    @Test
+    fun `portrait capture is rejected before resources even if payload says landscape`() {
+        every { PrimaryDisplayManager.getCaptureSize() } returns (1080 to 1920)
+        val failure = invoke("prepare", lib, payload().copy(screenWidth = 1920, screenHeight = 1080))!!
+        assertEquals(RunOutcome.FOREGROUND_LANDSCAPE_REQUIRED, field(failure, "outcome"))
+        assertTrue((field(failure, "reason") as String).contains("手动打开游戏"))
+        verify(exactly = 1) { PrimaryDisplayManager.getCaptureSize() }
+        verify(exactly = 0) { lib.MaaResourceCreate() }
+        verify(exactly = 0) { lib.MaaAndroidNativeControllerCreate(any()) }
+        verify(exactly = 0) { agentLib.MaaAgentClientCreateV2(any()) }
+    }
+
+    @Test
+    fun `changed primary input requests native task stop once with an explicit failure`() {
+        mockkObject(MaaFrameworkLoader)
+        every { MaaFrameworkLoader.library } returns lib
+        setField(runner, "running", true)
+        assertNull(prepareController(snapshot()))
+        every { PrimaryDisplayManager.getCaptureSize() } returns (720 to 1280)
+        assertFalse(PrimaryInputGuard.allowsInput(0))
+        assertFalse(PrimaryInputGuard.allowsInput(0))
+        invoke("awaitPrimaryInputStopRequests")
+        assertTrue((field(runner, "primaryCaptureFailure") as String).contains("1280×720 → 720×1280"))
+        verify(exactly = 1) { lib.MaaTaskerPostStop(taskers.single()) }
+    }
+
+    @Test
+    fun `manual stop disarms bound primary input before another round`() {
+        mockkObject(MaaFrameworkLoader)
+        every { MaaFrameworkLoader.library } returns lib
+        setField(runner, "running", true)
+        assertNull(prepareController(snapshot()))
+        assertTrue(PrimaryInputGuard.allowsInput(0))
+        assertTrue(runner.stop())
+        assertFalse(PrimaryInputGuard.allowsInput(0))
+        assertNull(field(runner, "primaryCaptureFailure"))
+        verify(exactly = 1) { lib.MaaTaskerPostStop(taskers.single()) }
+    }
+
+    @Test
+    fun `manual stop clears primary input before releasing the lifecycle lock to a new run`() {
+        mockkObject(MaaFrameworkLoader)
+        every { MaaFrameworkLoader.library } returns lib
+        setField(runner, "running", true)
+        assertNull(prepareController(snapshot()))
+        mockkStatic(DriverClass::class)
+        var cleared = false
+        every { DriverClass.cancelPrimaryInput() } answers {
+            assertTrue(Thread.holdsLock(field(runner, "lifecycleLock")))
+            assertFalse(PrimaryInputGuard.allowsInput(0))
+            cleared = true
+        }
+        assertTrue(runner.stop())
+        assertTrue(cleared)
+    }
+
+    @Test
+    fun `a delayed size callback from the previous run cannot stop a new run with the same bounds`() {
+        setField(runner, "running", true)
+        val target = snapshot()
+        assertNull(prepareController(target))
+        setField(runner, "runGeneration", 1L)
+        invoke("onPrimaryCaptureChanged", target, 720 to 1280, 0L)
+        invoke("awaitPrimaryInputStopRequests")
+        assertNull(field(runner, "primaryCaptureFailure"))
+        verify(exactly = 0) { lib.MaaTaskerPostStop(any()) }
+    }
+
+    @Test
+    fun `input callback queues without lifecycle lock and delayed stop cannot reach the next run`() {
+        setField(runner, "running", true)
+        val target = snapshot()
+        assertNull(prepareController(target))
+        val returned = CountDownLatch(1)
+        val callback = Thread {
+            invoke("onPrimaryCaptureChanged", target, 720 to 1280, 0L)
+            returned.countDown()
+        }
+        synchronized(field(runner, "lifecycleLock")!!) {
+            callback.start()
+            assertTrue("input callback must not wait for lifecycleLock", returned.await(2, TimeUnit.SECONDS))
+            // The old run ends and a new one reuses the same target before the queued stop gets the lock.
+            setField(runner, "runGeneration", 1L)
+        }
+        callback.join(2000)
+        invoke("awaitPrimaryInputStopRequests")
+        assertNull(field(runner, "primaryCaptureFailure"))
+        verify(exactly = 0) { lib.MaaTaskerPostStop(any()) }
+    }
+
+    @Test
+    fun `binder stop and changed input finish when native stop synchronously releases a touch`() {
+        mockkObject(MaaFrameworkLoader)
+        every { MaaFrameworkLoader.library } returns lib
+        setField(runner, "running", true)
+        assertNull(prepareController(snapshot()))
+        every { PrimaryDisplayManager.getCaptureSize() } returns (720 to 1280)
+        val inputHeld = CountDownLatch(1)
+        val nativeStopEntered = CountDownLatch(1)
+        val allowChangedInput = CountDownLatch(1)
+        every { lib.MaaTaskerPostStop(any()) } answers {
+            nativeStopEntered.countDown()
+            DriverClass.touchUp(100, 200, 0, 0) // v5.14.3 auto_release_pressed calls this synchronously.
+            1L
+        }
+        val input = Thread {
+            synchronized(DriverClass::class.java) {
+                inputHeld.countDown()
+                check(allowChangedInput.await(2, TimeUnit.SECONDS))
+                PrimaryInputGuard.allowsInput(0)
+            }
+        }
+        val stop = Thread { runner.stop() }
+        input.start()
+        assertTrue(inputHeld.await(2, TimeUnit.SECONDS))
+        stop.start()
+        assertTrue(nativeStopEntered.await(2, TimeUnit.SECONDS))
+        allowChangedInput.countDown()
+        input.join(2000)
+        stop.join(2000)
+        assertFalse("input callback deadlocked with Binder stop", input.isAlive)
+        assertFalse("native touch release deadlocked with input", stop.isAlive)
+        invoke("awaitPrimaryInputStopRequests")
+        assertNull(field(runner, "primaryCaptureFailure"))
+        verify(exactly = 1) { lib.MaaTaskerPostStop(taskers.single()) }
     }
 
     @Test

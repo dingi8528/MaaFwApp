@@ -78,6 +78,10 @@ object ScreenSize {
         return abs(longSide.toFloat() / shortSide - target) <= target * ASPECT_TOLERANCE
     }
 
+    /** Foreground Start must not prepare portrait touch bounds before the game turns landscape. */
+    fun isLandscape16x9(width: Int, height: Int): Boolean =
+        width > height && isAspect16x9(width, height)
+
     /**
      * 物理尺寸内能放下的最大 16:9，方向跟随原屏
      *

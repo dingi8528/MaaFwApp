@@ -63,6 +63,10 @@ object RunOutcome {
 
     /** reason 只带失败 agent 的序号：细节是带设备路径的排障字面量，只进特权进程 logcat，不当用户文案 */
     const val AGENT_LAUNCH_FAILED = 4
+
+    /** App side renders these shell-owned failures through localized resources. */
+    const val FOREGROUND_LANDSCAPE_REQUIRED = 5
+    const val FOREGROUND_CAPTURE_CHANGED = 6
 }
 
 /** 线格式的编解码；宽容未知字段，便于 app 与特权进程版本短暂不一致时不至于直接崩 */

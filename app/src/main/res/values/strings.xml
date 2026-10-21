@@ -43,6 +43,8 @@
     <!-- 运行开关 -->
     <string name="runner_start">开始任务</string>
     <string name="runner_foreground_blocked">当前是前台模式，请先切换到后台模式</string>
+    <string name="runner_foreground_landscape_required">前台模式需要横屏 16:9 游戏画面。请先调整分辨率，手动打开游戏并等待横屏稳定，再从悬浮操作面板开始；也可切换后台模式</string>
+    <string name="runner_foreground_capture_changed">前台运行中屏幕尺寸发生变化，任务已停止。请重新打开游戏并保持横屏 16:9，再从悬浮操作面板开始</string>
     <string name="runner_background_unsupported">Android 10 以下无法使用后台模式，尝试更换设备或者升级系统</string>
     <string name="runner_stop">停止</string>
     <string name="runner_stopping">停止中…</string>

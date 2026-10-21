@@ -48,6 +48,7 @@ public final class InputControlUtils {
      */
     private static List<TouchPointerSequence.Pointer> slots = Collections.emptyList();
     private static long gestureDownTime = 0;
+    private static Integer gestureDisplayId;
     /**
      * 解锁注入期间 >0：失败日志不带键码与坐标、不回调触控预览，PIN 与手势轨迹不能进可导出的日志；
      * 进程级而非线程级，任务线程此刻的失败日志也会打出 slots
@@ -181,11 +182,25 @@ public final class InputControlUtils {
     }
 
     private static void cancelGesture(int displayId) {
+        if (!slots.isEmpty() && !Integer.valueOf(displayId).equals(gestureDisplayId)) return;
         if (!slots.isEmpty()) {
             MotionEvent cancel = obtainEvent(slots, SystemClock.uptimeMillis(), MotionEvent.ACTION_CANCEL, -1);
             inject(cancel, slots, displayId, InputManager.INJECT_INPUT_EVENT_MODE_ASYNC, 0);
         }
         slots = Collections.emptyList();
+        gestureDisplayId = null;
+    }
+
+    /** Used when a foreground run is stopped or its touch coordinate space becomes invalid. */
+    public static synchronized void cancelActiveGesture(int displayId) {
+        if (!slots.isEmpty() && !Integer.valueOf(displayId).equals(gestureDisplayId)) return;
+        try {
+            cancelGesture(displayId);
+        } finally {
+            slots = Collections.emptyList();
+            gestureDownTime = 0;
+            gestureDisplayId = null;
+        }
     }
 
     private static TouchResult injectStep(TouchPointerSequence.Step step, int displayId) {
@@ -218,12 +233,18 @@ public final class InputControlUtils {
         // 未送达则槽位不动；之后同 contact 再按下会先整体 CANCEL 自愈
         if (result == TouchResult.DELIVERED) {
             slots = next;
+            gestureDisplayId = next.isEmpty() ? null : displayId;
         }
         return result;
     }
 
     private static synchronized TouchResult apply(TouchPointerSequence.Kind kind, int x, int y, int contact,
                                                   int displayId) {
+        if (!slots.isEmpty() && !Integer.valueOf(displayId).equals(gestureDisplayId)) {
+            // A new display starts its own gesture; MOVE/UP must never reuse another display's slots.
+            if (kind != TouchPointerSequence.Kind.Down) return TouchResult.FAILED;
+            cancelActiveGesture(gestureDisplayId);
+        }
         TouchPointerSequence.Step step = TouchPointerSequence.INSTANCE.plan(kind, slots, contact, x, y);
         if (!step.getOk()) {
             logPlanFailure(step, kind, x, y, contact, displayId);
@@ -256,9 +277,19 @@ public final class InputControlUtils {
         return injectKey(KeyEvent.ACTION_UP, keyCode, displayId, InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
     }
 
+    public static boolean cancelKey(int keyCode, int displayId) {
+        return injectKey(KeyEvent.ACTION_UP, keyCode, displayId,
+                InputManager.INJECT_INPUT_EVENT_MODE_ASYNC, KeyEvent.FLAG_CANCELED);
+    }
+
     private static boolean injectKey(int action, int keyCode, int displayId, int mode) {
+        return injectKey(action, keyCode, displayId, mode, 0);
+    }
+
+    private static boolean injectKey(int action, int keyCode, int displayId, int mode, int flags) {
         long now = SystemClock.uptimeMillis();
         KeyEvent keyEvent = new KeyEvent(now, now, action, keyCode, 0);
+        if (flags != 0) keyEvent = KeyEvent.changeFlags(keyEvent, flags);
 
         if (!setDisplayId(keyEvent, displayId)) {
             logKeyFailure(keyEvent, displayId, mode, STAGE_SET_DISPLAY_ID, -1);

@@ -22,6 +22,8 @@ import com.aliothmoon.maafw.runner.RemoteGameFpsReader
 import com.aliothmoon.maafw.telemetry.TelemetryController
 import com.aliothmoon.maafw.telemetry.TelemetryHook
 import com.aliothmoon.maafw.runner.ForegroundModePrecheck
+import com.aliothmoon.maafw.runner.ForegroundDisplayPrecheck
+import com.aliothmoon.maafw.util.ScreenSize
 import com.aliothmoon.maafw.runner.PrivilegedAccessPrecheck
 import com.aliothmoon.maafw.runner.PrivilegedConnectHook
 import com.aliothmoon.maafw.runner.OverlayClearHook
@@ -157,6 +159,7 @@ val runnerModule = module {
             prechecks = listOf(
                 PrivilegedAccessPrecheck(get(), get()),
                 ForegroundModePrecheck,
+                ForegroundDisplayPrecheck { ScreenSize.current(androidContext()) },
                 BackgroundModePrecheck(),
                 DisplayHazardPrecheck(get()),
             ),

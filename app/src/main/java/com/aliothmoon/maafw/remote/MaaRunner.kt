@@ -2,6 +2,7 @@ package com.aliothmoon.maafw.remote
 
 import com.aliothmoon.maafw.IMaaRunnerCallback
 import com.aliothmoon.maafw.bridge.NativeBridgeLib
+import com.aliothmoon.maafw.bridge.DriverClass
 import com.aliothmoon.maafw.constant.DefaultDisplayConfig
 import com.aliothmoon.maafw.constant.DisplayMode
 import com.aliothmoon.maafw.maa.MaaAgentClientLibrary
@@ -12,6 +13,7 @@ import com.aliothmoon.maafw.maa.MaaGlobalOption
 import com.aliothmoon.maafw.maa.MaaLoggingLevel
 import com.aliothmoon.maafw.maa.MaaStatus
 import com.aliothmoon.maafw.remote.internal.PrimaryDisplayManager
+import com.aliothmoon.maafw.remote.internal.PrimaryInputGuard
 import com.aliothmoon.maafw.remote.internal.VirtualDisplayManager
 import com.aliothmoon.maafw.runner.AgentPayload
 import com.aliothmoon.maafw.runner.RunOutcome
@@ -35,7 +37,12 @@ import java.util.concurrent.atomic.AtomicReference
  * native handle 全部只存在于这里；app 侧只经 binder 拿事件与结果
  * 单工作线程串行：MaaFramework 的一个 Tasker 同时只跑一轮
  */
-class MaaRunner(private val agentHost: AgentHost) {
+class MaaRunner(
+    private val agentHost: AgentHost,
+    private val primaryInputStopper: java.util.concurrent.ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "maa-primary-input-stop").apply { isDaemon = true }
+    },
+) {
 
     // agent child 由这条线程 fork，PDEATHSIG 认线程：线程被换掉时 child 一并收走，下一轮判不可复用重拉
     private val worker = Executors.newSingleThreadExecutor { r ->
@@ -46,6 +53,8 @@ class MaaRunner(private val agentHost: AgentHost) {
     private val lifecycleLock = Any()
     private var running = false
     private var stopRequested = false
+    private var primaryCaptureFailure: String? = null
+    private var runGeneration = 0L
     private val callbackRef = AtomicReference<IMaaRunnerCallback?>()
 
     // native handle
@@ -217,6 +226,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             }
             running = true
             stopRequested = false
+            primaryCaptureFailure = null
+            runGeneration++
         }
         val payload = runCatching { runPlanWireJson.decodeFromString<RunPlanPayload>(payloadJson) }
             .getOrElse {
@@ -235,6 +246,8 @@ class MaaRunner(private val agentHost: AgentHost) {
             if (!running) return true
             stopRequested = true
             tasker?.let(lib::MaaTaskerPostStop)
+            // Keep clearing this run's guard atomic with finish/start of another run.
+            releasePrimaryInputGuard()
         }
         return true
     }
@@ -250,6 +263,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             Ln.w("MaaRunner: native release skipped on destroy: $it")
         }
         worker.shutdownNow()
+        primaryInputStopper.shutdownNow()
     }
 
     private fun runPlan(payload: RunPlanPayload) {
@@ -277,7 +291,7 @@ class MaaRunner(private val agentHost: AgentHost) {
             var cancelled = false
             payload.tasks.forEachIndexed { index, task ->
                 if (cancelled) return@forEachIndexed
-                if (stopRequested(lib)) {
+                if (stopRequested(lib) || synchronized(lifecycleLock) { primaryCaptureFailure != null }) {
                     cancelled = true
                     return@forEachIndexed
                 }
@@ -294,7 +308,9 @@ class MaaRunner(private val agentHost: AgentHost) {
                     return@forEachIndexed
                 }
                 val status = lib.MaaTaskerWait(currentTasker, taskId)
-                val success = status == MaaStatus.SUCCEEDED
+                awaitPrimaryInputStopRequests()
+                val captureChanged = synchronized(lifecycleLock) { primaryCaptureFailure != null }
+                val success = status == MaaStatus.SUCCEEDED && !captureChanged
                 if (!success) anyFailed = true
                 // PostStop 一发，在跑的任务就带着失败从 Wait 返回：外壳叫停的不算任务自己失败。
                 // 只认外壳的 stop，pipeline 经 agent 自己 PostStop 的照旧算失败
@@ -302,7 +318,7 @@ class MaaRunner(private val agentHost: AgentHost) {
                 notify { onTaskFinished(task.taskName, success, statusText(status), stopped) }
 
                 // Stop 之后 Tasker 会把剩余任务直接判失败，这里提前收尾避免刷一串假失败
-                if (lib.MaaTaskerStopping(currentTasker).toInt() != 0) {
+                if (captureChanged || lib.MaaTaskerStopping(currentTasker).toInt() != 0) {
                     cancelled = true
                 }
             }
@@ -312,10 +328,20 @@ class MaaRunner(private val agentHost: AgentHost) {
                 anyFailed -> RunOutcome.COMPLETED_WITH_FAILURES
                 else -> RunOutcome.COMPLETED
             }
+            synchronized(lifecycleLock) { primaryCaptureFailure }?.let {
+                outcome = RunOutcome.FOREGROUND_CAPTURE_CHANGED
+                reason = it
+            }
         } catch (e: Throwable) {
             reason = "${e.javaClass.simpleName}: ${e.message}"
             Ln.e("MaaRunner: run failed: $reason")
         } finally {
+            awaitPrimaryInputStopRequests()
+            synchronized(lifecycleLock) { primaryCaptureFailure }?.let {
+                outcome = RunOutcome.FOREGROUND_CAPTURE_CHANGED
+                reason = it
+            }
+            releasePrimaryInputGuard()
             synchronized(lifecycleLock) {
                 running = false
                 stopRequested = false
@@ -346,9 +372,10 @@ class MaaRunner(private val agentHost: AgentHost) {
         val target = snapshotControllerTarget(payload) ?: return PrepareFailure(
             if (payload.displayMode == DisplayMode.PRIMARY) "主屏采集未启动" else "虚拟显示器未启动",
         )
-        if (payload.displayMode == DisplayMode.PRIMARY && !ScreenSize.isAspect16x9(target.width, target.height)) {
+        if (payload.displayMode == DisplayMode.PRIMARY && !ScreenSize.isLandscape16x9(target.width, target.height)) {
             return PrepareFailure(
-                "前台模式要求 16:9 画面，当前为 ${target.width}×${target.height}；请切换后台模式，或在首页调整主屏分辨率后重试",
+                "前台模式要求横屏 16:9 画面，当前为 ${target.width}×${target.height}；请切换后台模式，或在首页调整主屏分辨率，手动打开游戏并等待横屏稳定后，从悬浮操作面板开始",
+                outcome = RunOutcome.FOREGROUND_LANDSCAPE_REQUIRED,
             )
         }
         // bridge 必须先 System.loadLibrary 进本进程，控制单元按名 dlopen 才能命中同一份
@@ -420,7 +447,20 @@ class MaaRunner(private val agentHost: AgentHost) {
                 }
                 synchronized(lifecycleLock) { tasker = tsk }
             }
-            return registerAgentSinks()?.let { PrepareFailure(it) }
+            registerAgentSinks()?.let { return PrepareFailure(it) }
+            if (target.displayId == PrimaryDisplayManager.DISPLAY_ID) {
+                synchronized(lifecycleLock) {
+                    if (!stopRequested) {
+                        val generation = runGeneration
+                        PrimaryInputGuard.bind(target.width, target.height) { actual ->
+                            onPrimaryCaptureChanged(target, actual, generation)
+                        }
+                    }
+                }
+            } else {
+                releasePrimaryInputGuard()
+            }
+            return null
         } finally {
             // 没能改登记过去的（建 tasker 或登记失败），由 destroyTasker / destroyController 先收掉 agent
             retired?.let {
@@ -428,6 +468,35 @@ class MaaRunner(private val agentHost: AgentHost) {
                 it.controller?.let { handle -> destroyController(lib, handle) }
             }
         }
+    }
+
+    /** Native input calls this before injecting coordinates from a controller with stale bounds. */
+    private fun onPrimaryCaptureChanged(expected: ControllerTarget, actual: Pair<Int, Int>?, generation: Long) {
+        // This callback may hold DriverClass's input monitor. PostStop synchronously
+        // releases pressed inputs through DriverClass, so never take lifecycleLock here.
+        primaryInputStopper.execute {
+            synchronized(lifecycleLock) {
+                if (!running || stopRequested || runGeneration != generation ||
+                    boundControllerTarget != expected || primaryCaptureFailure != null) return@execute
+                val detail = "前台主屏尺寸变化：${expected.width}×${expected.height} → " +
+                        (actual?.let { "${it.first}×${it.second}" } ?: "采集不可用")
+                primaryCaptureFailure = detail
+                Ln.e("MaaRunner: $detail; rejecting primary input and stopping this run")
+                // Validate and post atomically: a delayed old callback cannot stop a reused tasker.
+                tasker?.let { MaaFrameworkLoader.library?.MaaTaskerPostStop(it) }
+            }
+        }
+    }
+
+    private fun awaitPrimaryInputStopRequests() {
+        // Native may finish the failed input before its queued stop is processed.
+        // Drain on the run worker, never on the native input callback thread.
+        runCatching { primaryInputStopper.submit {}.get(DESTROY_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS) }
+            .onFailure { Ln.w("MaaRunner: primary input stop drain failed", it) }
+    }
+
+    private fun releasePrimaryInputGuard() {
+        if (PrimaryInputGuard.clear()) DriverClass.cancelPrimaryInput()
     }
 
     /**
@@ -662,6 +731,7 @@ class MaaRunner(private val agentHost: AgentHost) {
 
     /** Tasker 手里是 controller 的裸指针，停止时还要用，必须先于它拆 */
     private fun releaseController(lib: MaaFrameworkLibrary) {
+        releasePrimaryInputGuard()
         releaseTasker(lib)
         controller?.let { destroyController(lib, it) }
         controller = null
