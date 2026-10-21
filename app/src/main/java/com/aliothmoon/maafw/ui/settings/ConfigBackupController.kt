@@ -57,6 +57,7 @@ fun ConfigBackupController(
     onActionConsumed: () -> Unit,
     onMessage: (String) -> Unit,
     service: ConfigBackupService = koinInject(),
+    uiVisible: Boolean = true,
 ) {
     val scope = rememberCoroutineScope()
     // 回调里取文案用：LocalContext 不随语言切换失效，Resources 会
@@ -128,7 +129,7 @@ fun ConfigBackupController(
         }
     }
 
-    if (pasteVisible) {
+    if (uiVisible && pasteVisible) {
         ShareCodeDialog(
             onDismiss = { pasteVisible = false },
             onSubmit = { text ->
@@ -138,7 +139,7 @@ fun ConfigBackupController(
         )
     }
 
-    pending?.let { import ->
+    pending?.takeIf { uiVisible }?.let { import ->
         ImportPreviewDialog(
             import = import,
             onDismiss = { pending = null },

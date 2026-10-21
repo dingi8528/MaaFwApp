@@ -1,6 +1,7 @@
 package com.aliothmoon.maafw.ui
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import android.net.Uri
 import timber.log.Timber
 import com.aliothmoon.maafw.settings.search.SettingLocation
@@ -64,12 +65,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -98,6 +101,7 @@ import com.aliothmoon.maafw.i18n.asString
 import com.aliothmoon.maafw.i18n.resolve
 import com.aliothmoon.maafw.overlay.OverlayController
 import com.aliothmoon.maafw.overlay.screensaver.ScreenSaverOverlayManager
+import com.aliothmoon.maafw.overlay.screensaver.ScreenSaverView
 import com.aliothmoon.maafw.privileged.ShizukuInstallHelper
 import com.aliothmoon.maafw.privileged.SystemPermission
 import com.aliothmoon.maafw.privileged.SystemPermissionRequester
@@ -323,6 +327,11 @@ fun AppRoot(
         }
 
         val context = LocalContext.current
+        val screenSaverActivity = context.findActivity()
+        DisposableEffect(screenSaverManager, screenSaverActivity) {
+            screenSaverActivity?.let(screenSaverManager::bindHostActivity)
+            onDispose { screenSaverActivity?.let(screenSaverManager::unbindHostActivity) }
+        }
         // 悬浮窗面板的「导出」：先把应用拉到前面，再由这条流打开 Activity 里的导出 sheet
         LaunchedEffect(overlayController) {
             overlayController.exportLogRequests.collect { exportSheetVisible = true }
@@ -390,6 +399,25 @@ fun AppRoot(
             onDispose { scheduleLifecycleOwner.lifecycle.removeObserver(observer) }
         }
 
+        val screenSaverShowing by screenSaverManager.isShowing.collectAsStateWithLifecycle()
+        val mainUiStateHolder = rememberSaveableStateHolder()
+        // 无条件挂在这一层：它注册的 SAF launcher 要活得比 sheet 的显隐久
+        LogExportController(
+            visible = exportSheetVisible && !screenSaverShowing,
+            onDismiss = { exportSheetVisible = false },
+            onMessage = { message -> Toast.makeText(context, message, Toast.LENGTH_SHORT).show() },
+        )
+        ConfigBackupController(
+            action = configBackupAction.takeUnless { screenSaverShowing },
+            uiVisible = !screenSaverShowing,
+            onActionConsumed = { configBackupAction = null },
+            onMessage = { message -> Toast.makeText(context, message, Toast.LENGTH_SHORT).show() },
+        )
+
+        // 屏保复用主 Activity 的 ViewRoot；撤下其它视觉内容也会撤下 Dialog/Sheet，SAF launcher 保持注册。
+        Box(Modifier.fillMaxSize()) {
+            if (!screenSaverShowing) {
+                mainUiStateHolder.SaveableStateProvider("main-ui") {
         // 未装/未启动/未授权时的引导；needsGuidance 为 false 时自身不渲染
         ShizukuReadinessDialog(
             readiness = state.shizukuReadiness,
@@ -723,18 +751,6 @@ fun AppRoot(
         }
         }
 
-        // 无条件挂在这一层：它注册的 SAF launcher 要活得比 sheet 的显隐久
-        LogExportController(
-            visible = exportSheetVisible,
-            onDismiss = { exportSheetVisible = false },
-            onMessage = { message -> Toast.makeText(context, message, Toast.LENGTH_SHORT).show() },
-        )
-        ConfigBackupController(
-            action = configBackupAction,
-            onActionConsumed = { configBackupAction = null },
-            onMessage = { message -> Toast.makeText(context, message, Toast.LENGTH_SHORT).show() },
-        )
-
         // 挂在 Scaffold 之外，才盖得住底部 tab 栏与系统栏
         val fullscreenResolution = state.previewResolution
         if (previewFullscreen && previewContent != null && fullscreenResolution != null) {
@@ -791,6 +807,19 @@ fun AppRoot(
                     TextButton(onClick = { diagnosticsDialog = null }) { Text(stringResource(R.string.dialog_ok)) }
                 },
             )
+        }
+                }
+            }
+            if (screenSaverShowing) {
+                BackHandler { /* 仅滑动条解除屏保，避免返回键改变下层导航。 */ }
+                MaaFwTheme(themeStyle = state.themeStyle, darkTheme = true) {
+                    ScreenSaverView(
+                        latestLog = screenSaverManager.latestLog,
+                        onUnlock = { scope.launch { screenSaverManager.hide() } },
+                        modifier = Modifier.fillMaxSize().zIndex(100f),
+                    )
+                }
+            }
         }
     }
 }
