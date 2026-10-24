@@ -1,21 +1,22 @@
 package com.aliothmoon.maafw.runner
 
 import kotlin.math.ceil
+import kotlin.math.roundToInt
 
 /**
  * 低帧率判定：最近 [windowSize] 个有效样本里低于阈值的占比达到 [minFraction] 才告警
  *
- * 用占比而不是均值，转场或加载时的短暂深谷不该触发；每档每次运行只提示一次
+ * 用占比而不是均值，转场或加载时的短暂深谷不该触发；每次运行只提示一次。
+ * FGO 以 30 FPS 为正常目标；按界面显示的整数帧率判定，避免 29.97 显示为 30 却告警。
  */
 class GameFpsAdvisor(
     private val windowSize: Int = DEFAULT_WINDOW_SIZE,
     private val lowThreshold: Float = LOW_FPS,
-    private val degradedThreshold: Float = DEGRADED_FPS,
     minFraction: Float = DEFAULT_MIN_FRACTION,
     private val maxIdleStreak: Int = DEFAULT_MAX_IDLE_STREAK,
 ) {
 
-    enum class Level { LOW, DEGRADED }
+    enum class Level { LOW }
 
     /** [medianFps] 是触发时窗口中位数，不是当次瞬时值 */
     data class Advice(val level: Level, val medianFps: Float)
@@ -24,24 +25,20 @@ class GameFpsAdvisor(
     private val window = ArrayDeque<Float>()
     private var idleStreak = 0
     private var lowAdvised = false
-    private var degradedAdvised = false
 
     fun onSample(fps: Float): Advice? {
-        if (fps <= 0f) {
+        if (!fps.isFinite() || fps <= 0f) {
             if (++idleStreak > maxIdleStreak) window.clear()
             return null
         }
         idleStreak = 0
-        window.addLast(fps)
+        window.addLast(fps.roundToInt().toFloat())
         while (window.size > windowSize) window.removeFirst()
         if (window.size < windowSize) return null
 
         return when {
             window.count { it < lowThreshold } >= requiredCount ->
                 advise(Level.LOW, lowAdvised).also { lowAdvised = true }
-
-            window.count { it < degradedThreshold } >= requiredCount ->
-                advise(Level.DEGRADED, degradedAdvised).also { degradedAdvised = true }
 
             else -> null
         }
@@ -62,6 +59,5 @@ class GameFpsAdvisor(
         const val DEFAULT_MIN_FRACTION = 0.8f
         const val DEFAULT_MAX_IDLE_STREAK = 3
         const val LOW_FPS = 30f
-        const val DEGRADED_FPS = 50f
     }
 }

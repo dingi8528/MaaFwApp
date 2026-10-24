@@ -72,8 +72,6 @@ class GameFpsWatcher(
                 GameFpsAdvisor.Level.LOW ->
                     journal.note(executionId, RunNote.Error, uiTextOf(R.string.run_log_game_fps_low, fps))
 
-                GameFpsAdvisor.Level.DEGRADED ->
-                    journal.note(executionId, RunNote.Warning, uiTextOf(R.string.run_log_game_fps_degraded, fps))
             }
         }
     }

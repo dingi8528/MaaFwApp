@@ -31,20 +31,46 @@ class GameFpsAdvisorTest {
     }
 
     @Test
-    fun `each level advises only once`() {
+    fun `low fps advises only once`() {
         val advisor = GameFpsAdvisor()
         var low: GameFpsAdvisor.Advice? = null
-        var degraded: GameFpsAdvisor.Advice? = null
 
         samples(lowCount = 15).forEach { sample -> low = advisor.onSample(sample) ?: low }
         assertEquals(GameFpsAdvisor.Level.LOW, low!!.level)
         repeat(5) { assertNull(advisor.onSample(25f)) }
 
-        samples(lowCount = 0, highFps = 40f).forEach { sample ->
-            degraded = advisor.onSample(sample) ?: degraded
+        samples(lowCount = 0, highFps = 40f).forEach { assertNull(advisor.onSample(it)) }
+    }
+
+    @Test
+    fun `30 fps and above never advise`() {
+        for (fps in listOf(30f, 31f, 40f, 49f, 50f, 60f)) {
+            val advisor = GameFpsAdvisor()
+            repeat(30) { assertNull("fps=$fps", advisor.onSample(fps)) }
         }
-        assertEquals(GameFpsAdvisor.Level.DEGRADED, degraded!!.level)
-        assertNull(advisor.onSample(40f))
+    }
+
+    @Test
+    fun `normal 30 fps jitter follows the displayed rounded fps`() {
+        val advisor = GameFpsAdvisor()
+        repeat(30) { assertNull(advisor.onSample(29.97f)) }
+    }
+
+    @Test
+    fun `displayed 29 fps still advises`() {
+        val advisor = GameFpsAdvisor()
+        repeat(14) { assertNull(advisor.onSample(29.49f)) }
+        assertEquals(29f, advisor.onSample(29.49f)!!.medianFps, 0.001f)
+    }
+
+    @Test
+    fun `invalid fps never advises or throws`() {
+        val advisor = GameFpsAdvisor()
+        repeat(30) {
+            for (fps in listOf(Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY, -1f, 0f)) {
+                assertNull(advisor.onSample(fps))
+            }
+        }
     }
 
     @Test

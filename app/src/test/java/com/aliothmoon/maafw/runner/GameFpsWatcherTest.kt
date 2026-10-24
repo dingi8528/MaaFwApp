@@ -66,16 +66,18 @@ class GameFpsWatcherTest {
     }
 
     @Test
-    fun `sustained degraded fps logs a warning`() = runTest {
+    fun `normal FGO frame rates do not write warnings or errors`() = runTest {
         val journal = RecordingJournal()
-        val watcher = GameFpsWatcher(object : GameFpsReader {
-            override suspend fun readGameFps(): Float? = 40f
-        }, journal, backgroundScope)
-        val advisor = GameFpsAdvisor()
+        for (fps in listOf(29.97f, 30f, 40f)) {
+            val watcher = GameFpsWatcher(object : GameFpsReader {
+                override suspend fun readGameFps(): Float? = fps
+            }, journal, backgroundScope)
+            val advisor = GameFpsAdvisor()
+            repeat(30) { watcher.pollOnce(EXECUTION_ID, advisor) }
+            assertEquals(fps, watcher.fps.value)
+        }
 
-        repeat(15) { watcher.pollOnce(EXECUTION_ID, advisor) }
-
-        assertEquals(listOf(RunNote.Warning), journal.notes.map { it.first })
+        assertEquals(emptyList<Pair<RunNote, UiText>>(), journal.notes)
     }
 
     @Test
