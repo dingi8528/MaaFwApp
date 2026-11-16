@@ -46,19 +46,19 @@ class DriverTapHoldTest {
     @Test
     fun `foreground short click is padded at exactly 30 fps`() {
         tap(0, 30f, 50)
-        verify(exactly = 1) { SystemClock.sleep(50L) }
+        verify(exactly = 1) { SystemClock.sleep(150L) }
     }
 
     @Test
     fun `background short click uses the same fps policy`() {
         tap(7, 20f, 50)
-        verify(exactly = 1) { SystemClock.sleep(100L) }
+        verify(exactly = 1) { SystemClock.sleep(150L) }
     }
 
     @Test
     fun `very low fps padding is capped`() {
         tap(7, 3f, 50)
-        verify(exactly = 1) { SystemClock.sleep(250L) }
+        verify(exactly = 1) { SystemClock.sleep(450L) }
     }
 
     @Test
@@ -68,8 +68,32 @@ class DriverTapHoldTest {
     }
 
     @Test
-    fun `unknown fps leaves the click unchanged`() {
+    fun `unknown fps still pads the click to 200 ms`() {
         tap(0, -1f, 50)
+        verify(exactly = 1) { SystemClock.sleep(150L) }
+    }
+
+    @Test
+    fun `zero fps still pads the click to 200 ms`() {
+        tap(7, 0f, 50)
+        verify(exactly = 1) { SystemClock.sleep(150L) }
+    }
+
+    @Test
+    fun `just above the old 30 fps boundary still pads the click`() {
+        tap(7, 30.001f, 50)
+        verify(exactly = 1) { SystemClock.sleep(150L) }
+    }
+
+    @Test
+    fun `10 fps click spans three frames`() {
+        tap(7, 10f, 50)
+        verify(exactly = 1) { SystemClock.sleep(250L) }
+    }
+
+    @Test
+    fun `hold beyond the compensation cap is preserved`() {
+        tap(7, 3f, 1500)
         verify(exactly = 0) { SystemClock.sleep(any()) }
     }
 }
